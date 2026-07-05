@@ -1,0 +1,12 @@
+.kb_cache/
+.env
+__pycache__/
+*.pyc
+.git/
+.gitignore
+*.md
+!local_docs/*.md
+deploy/
+sr1.sh
+sr2.sh
+L3:*

@@ -1,0 +1,95 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "CFT Support Agent - AWS App Runner deployment",
+  "Parameters": {
+    "ECRImageUri": {
+      "Type": "String",
+      "Description": "ECR image URI (e.g., 123456789.dkr.ecr.ap-southeast-1.amazonaws.com/cft-support-agent:latest)"
+    },
+    "AnthropicApiKey": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "Anthropic API key for Claude"
+    },
+    "AnthropicBaseUrl": {
+      "Type": "String",
+      "Default": "https://api.ai.tech.gov.sg/platform/models",
+      "Description": "Anthropic API base URL"
+    },
+    "JiraEmail": {
+      "Type": "String",
+      "Description": "Jira service account email"
+    },
+    "JiraApiToken": {
+      "Type": "String",
+      "NoEcho": true,
+      "Description": "Jira API token"
+    }
+  },
+  "Resources": {
+    "AppRunnerAccessRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "cft-support-agent-apprunner-access",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "build.apprunner.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess"
+        ]
+      }
+    },
+    "AppRunnerService": {
+      "Type": "AWS::AppRunner::Service",
+      "Properties": {
+        "ServiceName": "cft-support-agent",
+        "SourceConfiguration": {
+          "AuthenticationConfiguration": {
+            "AccessRoleArn": { "Fn::GetAtt": ["AppRunnerAccessRole", "Arn"] }
+          },
+          "ImageRepository": {
+            "ImageIdentifier": { "Ref": "ECRImageUri" },
+            "ImageRepositoryType": "ECR",
+            "ImageConfiguration": {
+              "Port": "8501",
+              "RuntimeEnvironmentVariables": [
+                { "Name": "ANTHROPIC_API_KEY", "Value": { "Ref": "AnthropicApiKey" } },
+                { "Name": "ANTHROPIC_BASE_URL", "Value": { "Ref": "AnthropicBaseUrl" } },
+                { "Name": "JIRA_EMAIL", "Value": { "Ref": "JiraEmail" } },
+                { "Name": "JIRA_API_TOKEN", "Value": { "Ref": "JiraApiToken" } }
+              ]
+            }
+          },
+          "AutoDeploymentsEnabled": true
+        },
+        "InstanceConfiguration": {
+          "Cpu": "1 vCPU",
+          "Memory": "2 GB"
+        },
+        "HealthCheckConfiguration": {
+          "Protocol": "HTTP",
+          "Path": "/_stcore/health",
+          "Interval": 20,
+          "Timeout": 10,
+          "HealthyThreshold": 1,
+          "UnhealthyThreshold": 5
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ServiceUrl": {
+      "Description": "App Runner service URL",
+      "Value": { "Fn::GetAtt": ["AppRunnerService", "ServiceUrl"] }
+    }
+  }
+}

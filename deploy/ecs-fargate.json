@@ -1,0 +1,329 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "CFT Support Agent - ECS Fargate with Secrets Manager & ECS Exec",
+  "Parameters": {
+    "VpcId": {
+      "Type": "AWS::EC2::VPC::Id",
+      "Default": "",
+      "Description": "VPC ID"
+    },
+    "SubnetIds": {
+      "Type": "List<AWS::EC2::Subnet::Id>",
+      "Default": "",
+      "Description": "Public subnets for ALB and ECS tasks (at least 2 in different AZs)"
+    },
+    "ECRImageUri": {
+      "Type": "String",
+      "Description": "ECR image URI (e.g., <account-id>.dkr.ecr.<region>.amazonaws.com/cft-support-agent:latest)"
+    },
+    "CertificateArn": {
+      "Type": "String",
+      "Default": "",
+      "Description": "ACM certificate ARN for HTTPS (leave empty for HTTP only)"
+    }
+  },
+  "Conditions": {
+    "HasCertificate": { "Fn::Not": [{ "Fn::Equals": [{ "Ref": "CertificateArn" }, ""] }] }
+  },
+  "Resources": {
+    "SecretAnthropicApiKey": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": "cft-support-agent/anthropic-api-key",
+        "Description": "Anthropic API key for CFT Support Agent",
+        "SecretString": "PLACEHOLDER_REPLACE_AFTER_DEPLOY"
+      }
+    },
+    "SecretAnthropicBaseUrl": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": "cft-support-agent/anthropic-base-url",
+        "Description": "Anthropic base URL",
+        "SecretString": "https://api.ai.tech.gov.sg/platform/models"
+      }
+    },
+    "SecretJiraEmail": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": "cft-support-agent/jira-email",
+        "Description": "Jira service account email",
+        "SecretString": "PLACEHOLDER_REPLACE_AFTER_DEPLOY"
+      }
+    },
+    "SecretJiraApiToken": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+        "Name": "cft-support-agent/jira-api-token",
+        "Description": "Jira API token",
+        "SecretString": "PLACEHOLDER_REPLACE_AFTER_DEPLOY"
+      }
+    },
+    "ECSCluster": {
+      "Type": "AWS::ECS::Cluster",
+      "Properties": {
+        "ClusterName": "cft-support-agent",
+        "Configuration": {
+          "ExecuteCommandConfiguration": {
+            "Logging": "DEFAULT"
+          }
+        },
+        "ClusterSettings": [
+          { "Name": "containerInsights", "Value": "enabled" }
+        ]
+      }
+    },
+    "LogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": "/ecs/cft-support-agent",
+        "RetentionInDays": 30
+      }
+    },
+    "TaskExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "cft-support-agent-task-execution",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+        ],
+        "Policies": [
+          {
+            "PolicyName": "SecretsAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "secretsmanager:GetSecretValue"
+                  ],
+                  "Resource": [
+                    { "Ref": "SecretAnthropicApiKey" },
+                    { "Ref": "SecretAnthropicBaseUrl" },
+                    { "Ref": "SecretJiraEmail" },
+                    { "Ref": "SecretJiraApiToken" }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "TaskRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "cft-support-agent-task-role",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ECSExecPolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ssmmessages:CreateControlChannel",
+                    "ssmmessages:CreateDataChannel",
+                    "ssmmessages:OpenControlChannel",
+                    "ssmmessages:OpenDataChannel"
+                  ],
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeLogStreams",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "TaskDefinition": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Properties": {
+        "Family": "cft-support-agent",
+        "NetworkMode": "awsvpc",
+        "RequiresCompatibilities": ["FARGATE"],
+        "Cpu": "1024",
+        "Memory": "2048",
+        "ExecutionRoleArn": { "Fn::GetAtt": ["TaskExecutionRole", "Arn"] },
+        "TaskRoleArn": { "Fn::GetAtt": ["TaskRole", "Arn"] },
+        "ContainerDefinitions": [
+          {
+            "Name": "cft-support-agent",
+            "Image": { "Ref": "ECRImageUri" },
+            "Essential": true,
+            "PortMappings": [
+              { "ContainerPort": 8501, "Protocol": "tcp" }
+            ],
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": "/ecs/cft-support-agent",
+                "awslogs-region": { "Ref": "AWS::Region" },
+                "awslogs-stream-prefix": "ecs"
+              }
+            },
+            "Secrets": [
+              {
+                "Name": "ANTHROPIC_API_KEY",
+                "ValueFrom": { "Ref": "SecretAnthropicApiKey" }
+              },
+              {
+                "Name": "ANTHROPIC_BASE_URL",
+                "ValueFrom": { "Ref": "SecretAnthropicBaseUrl" }
+              },
+              {
+                "Name": "JIRA_EMAIL",
+                "ValueFrom": { "Ref": "SecretJiraEmail" }
+              },
+              {
+                "Name": "JIRA_API_TOKEN",
+                "ValueFrom": { "Ref": "SecretJiraApiToken" }
+              }
+            ],
+            "LinuxParameters": {
+              "InitProcessEnabled": true
+            }
+          }
+        ]
+      }
+    },
+    "ALBSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "ALB for CFT Support Agent - IP restricted",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [
+          { "IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "CidrIp": "0.0.0.0/32", "Description": "Replace with your IP" },
+          { "IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "CidrIp": "0.0.0.0/32", "Description": "Replace with your IP" }
+        ],
+        "Tags": [
+          { "Key": "Name", "Value": "cft-support-agent-alb-sg" }
+        ]
+      }
+    },
+    "TaskSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "ECS tasks for CFT Support Agent",
+        "VpcId": { "Ref": "VpcId" },
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 8501,
+            "ToPort": 8501,
+            "SourceSecurityGroupId": { "Ref": "ALBSecurityGroup" }
+          }
+        ]
+      }
+    },
+    "ALB": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Properties": {
+        "Name": "cft-support-agent-alb",
+        "Scheme": "internet-facing",
+        "Type": "application",
+        "SecurityGroups": [{ "Ref": "ALBSecurityGroup" }],
+        "Subnets": { "Ref": "SubnetIds" }
+      }
+    },
+    "TargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Properties": {
+        "Name": "cft-support-agent-tg",
+        "Port": 8501,
+        "Protocol": "HTTP",
+        "TargetType": "ip",
+        "VpcId": { "Ref": "VpcId" },
+        "HealthCheckPath": "/_stcore/health",
+        "HealthCheckIntervalSeconds": 30,
+        "HealthyThresholdCount": 2,
+        "UnhealthyThresholdCount": 5,
+        "HealthCheckTimeoutSeconds": 10
+      }
+    },
+    "HTTPListener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Properties": {
+        "LoadBalancerArn": { "Ref": "ALB" },
+        "Port": 80,
+        "Protocol": "HTTP",
+        "DefaultActions": [
+          { "Type": "forward", "TargetGroupArn": { "Ref": "TargetGroup" } }
+        ]
+      }
+    },
+    "ECSService": {
+      "Type": "AWS::ECS::Service",
+      "DependsOn": "HTTPListener",
+      "Properties": {
+        "ServiceName": "cft-support-agent",
+        "Cluster": { "Ref": "ECSCluster" },
+        "TaskDefinition": { "Ref": "TaskDefinition" },
+        "DesiredCount": 1,
+        "LaunchType": "FARGATE",
+        "EnableExecuteCommand": true,
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "ENABLED",
+            "SecurityGroups": [{ "Ref": "TaskSecurityGroup" }],
+            "Subnets": { "Ref": "SubnetIds" }
+          }
+        },
+        "LoadBalancers": [
+          {
+            "ContainerName": "cft-support-agent",
+            "ContainerPort": 8501,
+            "TargetGroupArn": { "Ref": "TargetGroup" }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ServiceURL": {
+      "Description": "ALB URL for the CFT Support Agent",
+      "Value": { "Fn::Join": ["", ["http://", { "Fn::GetAtt": ["ALB", "DNSName"] }]] }
+    },
+    "ECSExecCommand": {
+      "Description": "Command to exec into the running container",
+      "Value": { "Fn::Join": ["", [
+        "aws ecs execute-command --cluster cft-support-agent --task <TASK_ID> ",
+        "--container cft-support-agent --interactive --command /bin/bash"
+      ]]}
+    },
+    "SecretsUpdateCommands": {
+      "Description": "Commands to update secrets after first deploy",
+      "Value": "Run: ./deploy/update-secrets.sh"
+    }
+  }
+}
